@@ -1,0 +1,29 @@
+[workspace]
+resolver = "2"
+
+[workspace.dependencies]
+proptest  = "1"
+criterion = { version = "0.5", features = ["html_reports"] }
+loom      = "0.7"
+
+# ── Package ──────────────────────────────────────────────────────────────────
+
+[package]
+name        = "bptree"
+version     = "0.1.0"
+edition     = "2021"
+description = "A high-performance, in-memory B+Tree library"
+license     = "MIT OR Apache-2.0"
+keywords    = ["btree", "data-structure", "index", "collections"]
+categories  = ["data-structures"]
+
+[dependencies]
+
+[dev-dependencies]
+proptest  = { workspace = true }
+criterion = { workspace = true }
+loom      = { workspace = true }
+
+[[bench]]
+name    = "throughput"
+harness = false
