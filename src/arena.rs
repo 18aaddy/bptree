@@ -60,7 +60,6 @@ where
     }
 
     /// Drops the node's initialized contents and returns its slot to the free list.
-    #[allow(dead_code)] // consumed by issue #5 (delete with node merging)
     pub fn free(&mut self, id: NodeId) {
         debug_assert!(!self.free.contains(&id), "double free of NodeId({})", id.0);
         match &mut self.nodes[id.0 as usize] {

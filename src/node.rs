@@ -77,6 +77,76 @@ where
         self.children[idx + 1] = child;
         self.len += 1;
     }
+
+    /// Append a separator key and a new rightmost child.
+    pub fn push_back(&mut self, key: K, child: NodeId) {
+        debug_assert!(!self.is_full());
+        let len = self.len as usize;
+        self.keys[len].write(key);
+        self.children[len + 1] = child;
+        self.len += 1;
+    }
+
+    /// Prepend a separator key and a new leftmost child, shifting existing entries right.
+    pub fn insert_front(&mut self, key: K, child: NodeId) {
+        debug_assert!(!self.is_full());
+        let len = self.len as usize;
+        for i in (0..len).rev() {
+            // SAFETY: i < len, so keys[i] is initialized; keys[i+1] is a valid slot we overwrite.
+            unsafe {
+                let k = self.keys[i].assume_init_read();
+                self.keys[i + 1].write(k);
+            }
+        }
+        for i in (0..=len).rev() {
+            self.children[i + 1] = self.children[i];
+        }
+        self.keys[0].write(key);
+        self.children[0] = child;
+        self.len += 1;
+    }
+
+    /// Remove and return the leftmost separator key and leftmost child, shifting the rest left.
+    pub fn pop_front(&mut self) -> (K, NodeId) {
+        let len = self.len as usize;
+        debug_assert!(len > 0);
+        // SAFETY: len > 0, so keys[0] is initialized; moved out and overwritten by the shift below.
+        let key = unsafe { self.keys[0].assume_init_read() };
+        let child = self.children[0];
+        for i in 1..len {
+            // SAFETY: i < len, so keys[i] is initialized; slot i-1 was just vacated.
+            unsafe {
+                let k = self.keys[i].assume_init_read();
+                self.keys[i - 1].write(k);
+            }
+        }
+        for i in 1..=len {
+            self.children[i - 1] = self.children[i];
+        }
+        self.len -= 1;
+        (key, child)
+    }
+
+    /// Remove and return the separator at `idx`, dropping the child to its right and shifting the
+    /// rest left. The caller owns the returned key.
+    pub fn pop_separator(&mut self, idx: usize) -> K {
+        let len = self.len as usize;
+        debug_assert!(idx < len);
+        // SAFETY: idx < len, so keys[idx] is initialized; moved out and overwritten by the shift.
+        let key = unsafe { self.keys[idx].assume_init_read() };
+        for i in idx + 1..len {
+            // SAFETY: i < len, so keys[i] is initialized; slot i-1 was just vacated.
+            unsafe {
+                let k = self.keys[i].assume_init_read();
+                self.keys[i - 1].write(k);
+            }
+        }
+        for i in idx + 1..len {
+            self.children[i] = self.children[i + 1];
+        }
+        self.len -= 1;
+        key
+    }
 }
 
 impl<K, V, const B: usize> LeafNode<K, V, B> {
@@ -125,7 +195,6 @@ impl<K, V, const B: usize> LeafNode<K, V, B> {
     }
 
     /// Remove the pair at `idx`, shifting later entries left, and return it.
-    #[allow(dead_code)] // consumed by issue #5 (delete)
     pub fn remove_at(&mut self, idx: usize) -> (K, V) {
         let len = self.len as usize;
         debug_assert!(idx < len);
