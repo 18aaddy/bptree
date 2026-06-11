@@ -244,6 +244,222 @@ where
 
         (separator, new_id)
     }
+
+    /// Removes `key`, returning its value if present.
+    pub fn remove<Q>(&mut self, key: &Q) -> Option<V>
+    where
+        K: Borrow<Q>,
+        Q: Ord + ?Sized,
+    {
+        let (removed, _) = self.remove_recursive(self.root, key);
+        if removed.is_some() {
+            self.len -= 1;
+            self.maybe_collapse_root();
+        }
+        removed
+    }
+
+    fn remove_recursive<Q>(&mut self, node_id: NodeId, key: &Q) -> (Option<V>, bool)
+    where
+        K: Borrow<Q>,
+        Q: Ord + ?Sized,
+    {
+        match self.arena.get(node_id) {
+            Node::Leaf(leaf) => match leaf.find_key_idx(key) {
+                Err(_) => (None, false),
+                Ok(idx) => {
+                    let leaf = self.arena.get_leaf_mut(node_id);
+                    let (_, val) = leaf.remove_at(idx);
+                    (Some(val), self.underflows(node_id))
+                }
+            },
+            Node::Internal(internal) => {
+                let child_idx = internal.find_child_idx(key);
+                let child_id = internal.children[child_idx];
+                let (removed, child_underflowed) = self.remove_recursive(child_id, key);
+                if child_underflowed {
+                    self.fix_underflow(node_id, child_idx);
+                }
+                (removed, self.underflows(node_id))
+            }
+        }
+    }
+
+    fn underflows(&self, id: NodeId) -> bool {
+        let min = (B - 1) / 2;
+        match self.arena.get(id) {
+            Node::Internal(internal) => (internal.len as usize) < min,
+            Node::Leaf(leaf) => (leaf.len as usize) < min,
+        }
+    }
+
+    fn can_lend(&self, id: NodeId) -> bool {
+        let min = (B - 1) / 2;
+        match self.arena.get(id) {
+            Node::Internal(internal) => (internal.len as usize) > min,
+            Node::Leaf(leaf) => (leaf.len as usize) > min,
+        }
+    }
+
+    fn fix_underflow(&mut self, parent_id: NodeId, child_idx: usize) {
+        let parent = self.arena.get_internal(parent_id);
+        let has_left = child_idx > 0;
+        let has_right = child_idx < parent.len as usize;
+
+        if has_left && self.can_lend(parent.children[child_idx - 1]) {
+            self.rotate_right(parent_id, child_idx);
+        } else if has_right && self.can_lend(parent.children[child_idx + 1]) {
+            self.rotate_left(parent_id, child_idx);
+        } else if has_left {
+            self.merge_children(parent_id, child_idx - 1);
+        } else {
+            self.merge_children(parent_id, child_idx);
+        }
+    }
+
+    fn rotate_right(&mut self, parent_id: NodeId, child_idx: usize) {
+        let parent = self.arena.get_internal(parent_id);
+        let left_id = parent.children[child_idx - 1];
+        let child_id = parent.children[child_idx];
+        let sep_idx = child_idx - 1;
+
+        match self.arena.get(child_id) {
+            Node::Leaf(_) => {
+                let left = self.arena.get_leaf_mut(left_id);
+                let (k, v) = left.remove_at(left.len as usize - 1);
+                let child = self.arena.get_leaf_mut(child_id);
+                child.insert_at(0, k.clone(), v);
+                let parent = self.arena.get_internal_mut(parent_id);
+                // SAFETY: sep_idx < parent.len, so the separator slot is initialized; overwritten.
+                unsafe { parent.keys[sep_idx].assume_init_drop() };
+                parent.keys[sep_idx].write(k);
+            }
+            Node::Internal(_) => {
+                let parent = self.arena.get_internal_mut(parent_id);
+                // SAFETY: sep_idx < parent.len, so the separator is initialized; moved down.
+                let sep = unsafe { parent.keys[sep_idx].assume_init_read() };
+                let left = self.arena.get_internal_mut(left_id);
+                let last = left.len as usize - 1;
+                // SAFETY: last < left.len, so the key is initialized; moved up to the parent.
+                let lent_key = unsafe { left.keys[last].assume_init_read() };
+                let lent_child = left.children[last + 1];
+                left.len -= 1;
+                let child = self.arena.get_internal_mut(child_id);
+                child.insert_front(sep, lent_child);
+                let parent = self.arena.get_internal_mut(parent_id);
+                parent.keys[sep_idx].write(lent_key);
+            }
+        }
+    }
+
+    fn rotate_left(&mut self, parent_id: NodeId, child_idx: usize) {
+        let parent = self.arena.get_internal(parent_id);
+        let right_id = parent.children[child_idx + 1];
+        let child_id = parent.children[child_idx];
+        let sep_idx = child_idx;
+
+        match self.arena.get(child_id) {
+            Node::Leaf(_) => {
+                let right = self.arena.get_leaf_mut(right_id);
+                let (k, v) = right.remove_at(0);
+                // SAFETY: right still has >= 1 key (it lent from a node above min); slot 0 initialized.
+                let new_sep = unsafe { right.keys[0].assume_init_ref().clone() };
+                let child = self.arena.get_leaf_mut(child_id);
+                child.insert_at(child.len as usize, k, v);
+                let parent = self.arena.get_internal_mut(parent_id);
+                // SAFETY: sep_idx < parent.len, so the separator slot is initialized; overwritten.
+                unsafe { parent.keys[sep_idx].assume_init_drop() };
+                parent.keys[sep_idx].write(new_sep);
+            }
+            Node::Internal(_) => {
+                let parent = self.arena.get_internal_mut(parent_id);
+                // SAFETY: sep_idx < parent.len, so the separator is initialized; moved down.
+                let sep = unsafe { parent.keys[sep_idx].assume_init_read() };
+                let right = self.arena.get_internal_mut(right_id);
+                let (lent_key, lent_child) = right.pop_front();
+                let child = self.arena.get_internal_mut(child_id);
+                child.push_back(sep, lent_child);
+                let parent = self.arena.get_internal_mut(parent_id);
+                parent.keys[sep_idx].write(lent_key);
+            }
+        }
+    }
+
+    fn merge_children(&mut self, parent_id: NodeId, left_idx: usize) {
+        let parent = self.arena.get_internal(parent_id);
+        let left_id = parent.children[left_idx];
+        let right_id = parent.children[left_idx + 1];
+
+        let separator = self
+            .arena
+            .get_internal_mut(parent_id)
+            .pop_separator(left_idx);
+
+        match self.arena.get(left_id) {
+            Node::Leaf(_) => {
+                // Leaf separators are copies of a leaf key, not pulled into the merged node.
+                drop(separator);
+                let right = self.arena.get_leaf_mut(right_id);
+                let right_next = right.next;
+                let moved: Vec<(K, V)> = (0..right.len as usize)
+                    // SAFETY: i < right.len, so both slots are initialized; moved out and
+                    // right.len is zeroed so free() does not drop them again.
+                    .map(|i| unsafe {
+                        (
+                            right.keys[i].assume_init_read(),
+                            right.vals[i].assume_init_read(),
+                        )
+                    })
+                    .collect();
+                right.len = 0;
+                let left = self.arena.get_leaf_mut(left_id);
+                let mut at = left.len as usize;
+                for (k, v) in moved {
+                    left.insert_at(at, k, v);
+                    at += 1;
+                }
+                left.next = right_next;
+                if let Some(next_id) = right_next {
+                    self.arena.get_leaf_mut(next_id).prev = Some(left_id);
+                }
+            }
+            Node::Internal(_) => {
+                let right = self.arena.get_internal_mut(right_id);
+                let right_len = right.len as usize;
+                let moved_keys: Vec<K> = (0..right_len)
+                    // SAFETY: i < right.len, so keys[i] is initialized; moved out, right.len zeroed.
+                    .map(|i| unsafe { right.keys[i].assume_init_read() })
+                    .collect();
+                let moved_children: Vec<NodeId> = right.children[..=right_len].to_vec();
+                right.len = 0;
+                let left = self.arena.get_internal_mut(left_id);
+                let mut at = left.len as usize;
+                left.keys[at].write(separator);
+                left.children[at + 1] = moved_children[0];
+                left.len += 1;
+                at += 1;
+                for (i, k) in moved_keys.into_iter().enumerate() {
+                    left.keys[at].write(k);
+                    left.children[at + 1] = moved_children[i + 1];
+                    left.len += 1;
+                    at += 1;
+                }
+            }
+        }
+
+        self.arena.free(right_id);
+    }
+
+    fn maybe_collapse_root(&mut self) {
+        if let Node::Internal(internal) = self.arena.get(self.root) {
+            if internal.len == 0 {
+                let only_child = internal.children[0];
+                let old_root = self.root;
+                self.root = only_child;
+                self.arena.free(old_root);
+            }
+        }
+    }
 }
 
 impl<K, V, const B: usize> Default for BPlusTree<K, V, B>
@@ -253,6 +469,21 @@ where
 {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+impl<K, V, const B: usize> Drop for BPlusTree<K, V, B>
+where
+    [(); B + 1]:,
+{
+    fn drop(&mut self) {
+        let mut stack = vec![self.root];
+        while let Some(id) = stack.pop() {
+            if let Node::Internal(internal) = self.arena.get(id) {
+                stack.extend_from_slice(&internal.children[..=internal.len as usize]);
+            }
+            self.arena.free(id);
+        }
     }
 }
 
@@ -426,5 +657,220 @@ mod tests {
         assert_eq!(tree.height(), 1);
         tree.insert(B as i32, B as i32);
         assert_eq!(tree.height(), 2);
+    }
+
+    #[test]
+    fn remove_non_existent_key() {
+        let mut tree: BPlusTree<i32, i32, B> = BPlusTree::new();
+        tree.insert(10, 100);
+        assert_eq!(tree.remove(&99), None);
+        assert_eq!(tree.len(), 1);
+        assert_eq!(tree.get(&10), Some(&100));
+    }
+
+    #[test]
+    fn remove_from_single_leaf() {
+        let mut tree: BPlusTree<i32, i32, B> = BPlusTree::new();
+        tree.insert(10, 100);
+        tree.insert(20, 200);
+        assert_eq!(tree.remove(&10), Some(100));
+        assert_eq!(tree.len(), 1);
+        assert_eq!(tree.get(&10), None);
+        assert_eq!(tree.get(&20), Some(&200));
+    }
+
+    #[test]
+    fn remove_last_element_leaves_empty_root_leaf() {
+        let mut tree: BPlusTree<i32, i32, B> = BPlusTree::new();
+        tree.insert(42, 1);
+        assert_eq!(tree.remove(&42), Some(1));
+        assert!(tree.is_empty());
+        assert_eq!(tree.len(), 0);
+        assert_eq!(tree.height(), 1);
+        assert!(matches!(tree.arena.get(tree.root), Node::Leaf(_)));
+    }
+
+    #[test]
+    fn remove_causing_merge_collapses_root() {
+        let mut tree: BPlusTree<i32, i32, B> = BPlusTree::new();
+        for i in 0..5 {
+            tree.insert(i, i * 10);
+        }
+        assert_eq!(tree.height(), 2);
+        for i in 0..4 {
+            assert_eq!(tree.remove(&i), Some(i * 10));
+        }
+        assert_eq!(tree.height(), 1);
+        assert_eq!(tree.len(), 1);
+        assert_eq!(tree.get(&4), Some(&40));
+    }
+
+    #[test]
+    fn remove_preserves_leaf_links_and_order() {
+        let mut tree: BPlusTree<i32, i32, B> = BPlusTree::new();
+        for i in 0..30 {
+            tree.insert(i, i);
+        }
+        for i in (0..30).step_by(3) {
+            assert_eq!(tree.remove(&i), Some(i));
+        }
+        let leaves = collect_leaves(&tree);
+        let expected: Vec<(i32, i32)> = (0..30).filter(|i| i % 3 != 0).map(|i| (i, i)).collect();
+        assert_eq!(leaves, expected);
+    }
+
+    fn interleaved_oracle<const BB: usize>(seed: u64, ops: usize, modulo: i32)
+    where
+        [(); BB + 1]:,
+    {
+        use std::collections::BTreeMap;
+        let mut tree: BPlusTree<i32, i32, BB> = BPlusTree::new();
+        let mut oracle = BTreeMap::new();
+        let mut state = seed;
+        for _ in 0..ops {
+            state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            let key = (state >> 33) as i32 % modulo;
+            if state & 1 == 0 {
+                assert_eq!(tree.insert(key, key * 7), oracle.insert(key, key * 7));
+            } else {
+                assert_eq!(tree.remove(&key), oracle.remove(&key));
+            }
+            assert_eq!(tree.len(), oracle.len());
+        }
+        let leaves: Vec<(i32, i32)> = {
+            let mut id = tree.root;
+            while let Node::Internal(internal) = tree.arena.get(id) {
+                id = internal.children[0];
+            }
+            let mut out = Vec::new();
+            let mut prev: Option<NodeId> = None;
+            loop {
+                let leaf = tree.arena.get_leaf(id);
+                assert_eq!(leaf.prev, prev, "prev back-link broken");
+                for i in 0..leaf.len as usize {
+                    // SAFETY: i < len, slots initialized.
+                    out.push(unsafe {
+                        (
+                            *leaf.keys[i].assume_init_ref(),
+                            *leaf.vals[i].assume_init_ref(),
+                        )
+                    });
+                }
+                match leaf.next {
+                    Some(next) => {
+                        prev = Some(id);
+                        id = next;
+                    }
+                    None => break,
+                }
+            }
+            out
+        };
+        let expected: Vec<(i32, i32)> = oracle.iter().map(|(&k, &v)| (k, v)).collect();
+        assert_eq!(leaves, expected);
+        for (&k, &v) in &oracle {
+            assert_eq!(tree.get(&k), Some(&v));
+        }
+    }
+
+    #[test]
+    fn interleaved_insert_remove_match_btreemap_b4() {
+        interleaved_oracle::<4>(0xDEAD_BEEF, 2000, 60);
+    }
+
+    #[test]
+    fn interleaved_insert_remove_match_btreemap_b5() {
+        interleaved_oracle::<5>(0x0BADF00D, 2000, 80);
+    }
+
+    #[test]
+    fn interleaved_insert_remove_match_btreemap_b15() {
+        interleaved_oracle::<15>(0xFACEFEED, 5000, 300);
+    }
+
+    #[test]
+    fn string_keys_force_internal_merge() {
+        let mut tree: BPlusTree<String, u32, 4> = BPlusTree::new();
+        for i in 0..40u32 {
+            tree.insert(format!("k{i:03}"), i);
+        }
+        for i in 0..40u32 {
+            assert_eq!(tree.remove(format!("k{i:03}").as_str()), Some(i));
+            assert_eq!(tree.len(), (39 - i) as usize);
+        }
+        assert!(tree.is_empty());
+    }
+
+    #[test]
+    fn string_keys_force_rotation() {
+        let mut tree: BPlusTree<String, u32, 4> = BPlusTree::new();
+        for i in 0..40u32 {
+            tree.insert(format!("k{i:03}"), i);
+        }
+        // Delete from the high end so left siblings keep spare keys -> right rotation.
+        for i in (10..40u32).rev() {
+            assert_eq!(tree.remove(format!("k{i:03}").as_str()), Some(i));
+        }
+        // Delete from the low end -> left rotation from right siblings.
+        for i in 0..10u32 {
+            assert_eq!(tree.remove(format!("k{i:03}").as_str()), Some(i));
+        }
+        assert!(tree.is_empty());
+    }
+
+    #[test]
+    fn interleaved_string_keys_no_double_free() {
+        use std::collections::BTreeMap;
+        let mut tree: BPlusTree<String, u64, 4> = BPlusTree::new();
+        let mut oracle = BTreeMap::new();
+        let mut state: u64 = 0xC0FFEE;
+        for _ in 0..3000 {
+            state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            let key = format!("k{:04}", (state >> 33) % 80);
+            if state & 1 == 0 {
+                assert_eq!(tree.insert(key.clone(), state), oracle.insert(key, state));
+            } else {
+                assert_eq!(tree.remove(key.as_str()), oracle.remove(&key));
+            }
+            assert_eq!(tree.len(), oracle.len());
+        }
+        for (k, &v) in &oracle {
+            assert_eq!(tree.get(k.as_str()), Some(&v));
+        }
+    }
+
+    #[test]
+    fn drop_does_not_leak() {
+        use std::rc::Rc;
+        let witness = Rc::new(());
+        {
+            let mut tree: BPlusTree<i32, Rc<()>, B> = BPlusTree::new();
+            for i in 0..200 {
+                tree.insert(i, Rc::clone(&witness));
+            }
+            assert_eq!(Rc::strong_count(&witness), 201);
+        }
+        assert_eq!(Rc::strong_count(&witness), 1);
+    }
+
+    #[test]
+    fn drop_after_removals_does_not_leak() {
+        use std::rc::Rc;
+        let witness = Rc::new(());
+        {
+            let mut tree: BPlusTree<i32, Rc<()>, B> = BPlusTree::new();
+            for i in 0..100 {
+                tree.insert(i, Rc::clone(&witness));
+            }
+            for i in 0..50 {
+                tree.remove(&i);
+            }
+            assert_eq!(Rc::strong_count(&witness), 51);
+        }
+        assert_eq!(Rc::strong_count(&witness), 1);
     }
 }
