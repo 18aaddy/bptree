@@ -1,3 +1,5 @@
+#![allow(dead_code)] // write-path methods consumed by issues #4 (insert) and #5 (delete)
+
 use std::borrow::Borrow;
 use std::mem::MaybeUninit;
 
