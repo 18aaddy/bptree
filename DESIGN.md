@@ -408,6 +408,7 @@ benches/
 | Decision | Choice | Rationale |
 | -------- | ------ | --------- |
 | Default branch factor | `B = 15` (fixed) | Fits leaf node in ~256 bytes for 8-byte K+V; dynamic computation from `sizeof` not worth the complexity in stable Rust const generics |
+| Rust channel | Nightly (`rust-toolchain.toml`) + `#![feature(generic_const_exprs)]` | `[NodeId; B + 1]` in `InternalNode` requires const arithmetic on generics, which is nightly-only. `#![allow(incomplete_features)]` silences the stability warning. |
 | Key borrowing | `get<Q> where K: Borrow<Q>` from day one | Matches `std::collections::BTreeMap`; avoids forcing callers to allocate owned keys for lookups |
 | no-std support | Deferred | Low priority for v1; architecture (arena over raw alloc) is compatible if needed later |
 | Value storage | Inline in leaf nodes | Keeps locality; users with large `V` can wrap in `Box<V>` themselves. `SlottedLeaf` variant deferred. |
