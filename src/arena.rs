@@ -1,3 +1,5 @@
+#![allow(dead_code)] // alloc/free and typed accessors consumed by issues #4 and #5
+
 use std::mem::MaybeUninit;
 
 use crate::node::{InternalNode, LeafNode, Node, NodeId};
