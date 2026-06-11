@@ -1,5 +1,3 @@
-#![allow(dead_code)] // write-path methods consumed by issues #4 (insert) and #5 (delete)
-
 use std::borrow::Borrow;
 use std::mem::MaybeUninit;
 
@@ -127,6 +125,7 @@ impl<K, V, const B: usize> LeafNode<K, V, B> {
     }
 
     /// Remove the pair at `idx`, shifting later entries left, and return it.
+    #[allow(dead_code)] // consumed by issue #5 (delete)
     pub fn remove_at(&mut self, idx: usize) -> (K, V) {
         let len = self.len as usize;
         debug_assert!(idx < len);
